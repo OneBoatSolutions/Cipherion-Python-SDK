@@ -4,354 +4,44 @@ CipherionClient - Python 3 port of the TypeScript CipherionClient
 
 from __future__ import annotations
 
+import json
 import os
 import time
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Optional
-
 import requests
 from dotenv import load_dotenv
+from ..errors.cipherion_error import CipherionError
+from ..utils.migration import MigrationHelper
+from ..utils.http import HttpClient
+from ..utils.logger import CipherionLogger
+from ..utils.validation import Validator
+from ..types.client import CipherionConfig, MigrationOptions, MigrationProgress,MigrationResult
+from ..types.api import DeepDecryptOptions, DeepEncryptOptions
 
 load_dotenv()
-
-
-# ---------------------------------------------------------------------------
-# Types / dataclasses
-# ---------------------------------------------------------------------------
-
-@dataclass
-class CipherionConfig:
-    base_url: str = ""
-    project_id: str = ""
-    api_key: str = ""
-    passphrase: str = ""
-    timeout: int = 30_000          # milliseconds, kept consistent with TS
-    retries: int = 3
-    log_level: str = "info"
-    enable_logging: bool = True
-
-
-@dataclass
-class MigrationOptions:
-    batch_size: int = 10
-    retries: int = 3
-    delay_between_batches_ms: int = 0
-
-
-@dataclass
-class MigrationSummary:
-    total: int
-    processed: int
-    successful: int
-    failed: int
-    percentage: float
-
-
-@dataclass
-class MigrationResult:
-    successful: list[Any]
-    failed: list[Any]
-    summary: MigrationSummary
-
-
-@dataclass
-class DeepEncryptOptions:
-    exclude_fields: Optional[list[str]] = None
-    exclude_patterns: Optional[list[str]] = None
-
-
-@dataclass
-class DeepDecryptOptions:
-    exclude_fields: Optional[list[str]] = None
-    exclude_patterns: Optional[list[str]] = None
-    fail_gracefully: Optional[bool] = None
-
-
-# ---------------------------------------------------------------------------
-# Errors
-# ---------------------------------------------------------------------------
-
-class CipherionError(Exception):
-    def __init__(self, message: str, status_code: int = 500) -> None:
-        super().__init__(message)
-        self.status_code = status_code
-        self.message = message
-
-    def __repr__(self) -> str:  # pragma: no cover
-        return f"CipherionError(message={self.message!r}, status_code={self.status_code})"
-
-
-# ---------------------------------------------------------------------------
-# Logger
-# ---------------------------------------------------------------------------
-
-class CipherionLogger:
-    _LEVEL_MAP = {
-        "debug": logging.DEBUG,
-        "info": logging.INFO,
-        "warn": logging.WARNING,
-        "warning": logging.WARNING,
-        "error": logging.ERROR,
-    }
-
-    def __init__(self, log_level: str = "info") -> None:
-        self._logger = logging.getLogger("cipherion")
-        level = self._LEVEL_MAP.get(log_level.lower(), logging.INFO)
-        self._logger.setLevel(level)
-        if not self._logger.handlers:
-            handler = logging.StreamHandler()
-            handler.setFormatter(logging.Formatter("[%(levelname)s] %(name)s: %(message)s"))
-            self._logger.addHandler(handler)
-
-    def info(self, msg: str, extra: Optional[dict] = None) -> None:
-        self._logger.info(msg, extra=extra or {})
-
-    def warn(self, msg: str, extra: Optional[dict] = None) -> None:
-        self._logger.warning(msg, extra=extra or {})
-
-    def error(self, msg: str, extra: Optional[dict] = None) -> None:
-        self._logger.error(msg, extra=extra or {})
-
-    def log_crypto_operation(self, operation: str, status: str, details: dict) -> None:
-        self._logger.info("[CryptoOp] %s | %s | %s", operation, status, details)
-
-    def log_migration_operation(self, operation: str, status: str, details: dict) -> None:
-        self._logger.info("[MigrationOp] %s | %s | %s", operation, status, details)
-
-
-# ---------------------------------------------------------------------------
-# HTTP client
-# ---------------------------------------------------------------------------
-
-class HttpClient:
-    def __init__(
-        self,
-        base_url: str,
-        api_key: str,
-        timeout_ms: int,
-        logger: CipherionLogger,
-    ) -> None:
-        self._base_url = base_url.rstrip("/")
-        self._api_key = api_key
-        self._timeout = timeout_ms / 1_000  # convert ms → seconds for requests lib
-        self._logger = logger
-        self._session = requests.Session()
-        self._session.headers.update({
-            "Content-Type": "application/json",
-            "x-api-key": self._api_key,
-            "User-Agent": "Cipherion-SDK/1.0",
-
-        })
-
-    def post(self, path: str, body: dict) -> dict:
-        url = f"{self._base_url}{path}"
-        try:
-            response = self._session.post(url, json=body, timeout=self._timeout)
-            response.raise_for_status()
-            return response.json()
-        except requests.HTTPError as exc:
-            status = exc.response.status_code if exc.response is not None else 500
-            try:
-                server_message = exc.response.json().get("message", str(exc))
-            except Exception:
-                server_message = str(exc)
-            raise CipherionError(server_message, status) from exc
-        except requests.RequestException as exc:
-            raise CipherionError(str(exc), 500) from exc
-
-
-# ---------------------------------------------------------------------------
-# Validator
-# ---------------------------------------------------------------------------
-
-class Validator:
-    @staticmethod
-    def validate_config(config: CipherionConfig) -> None:
-        if not config.base_url:
-            raise CipherionError("baseUrl is required", 400)
-        if not config.project_id:
-            raise CipherionError("projectId is required", 400)
-        if not config.api_key:
-            raise CipherionError("apiKey is required", 400)
-
-    @staticmethod
-    def validate_data(data: Any) -> None:
-        if data is None:
-            raise CipherionError("Data cannot be null/None", 400)
-
-    @staticmethod
-    def validate_encrypted_data(data: Any) -> None:
-        if data is None:
-            raise CipherionError("Encrypted data cannot be null/None", 400)
-
-    @staticmethod
-    def validate_passphrase(passphrase: str) -> None:
-        if not passphrase:
-            raise CipherionError("Passphrase cannot be empty", 400)
-
-
-# ---------------------------------------------------------------------------
-# Migration helper
-# ---------------------------------------------------------------------------
-
-class MigrationHelper:
-    def __init__(self, client: "CipherionClient") -> None:
-        self._client = client
-
-    def encrypt_migration(
-        self,
-        data_array: list[Any],
-        passphrase: str,
-        options: Optional[MigrationOptions] = None,
-    ) -> MigrationResult:
-        return self._run_migration(
-            data_array,
-            passphrase,
-            operation="encrypt",
-            options=options,
-        )
-
-    def decrypt_migration(
-        self,
-        encrypted_array: list[Any],
-        passphrase: str,
-        options: Optional[MigrationOptions] = None,
-    ) -> MigrationResult:
-        return self._run_migration(
-            encrypted_array,
-            passphrase,
-            operation="decrypt",
-            options=options,
-        )
-
-    def _run_migration(
-        self,
-        items: list[Any],
-        passphrase: str,
-        operation: str,
-        options: Optional[MigrationOptions] = None,
-    ) -> MigrationResult:
-        import math
-
-        batch_size = options.batch_size if options else 10
-        successful: list[Any] = []
-        failed: list[Any] = []
-
-        for i in range(0, len(items), batch_size):
-            batch = items[i : i + batch_size]
-            for item in batch:
-                try:
-                    if operation == "encrypt":
-                        result = self._client.deep_encrypt(item)
-                    else:
-                        result = self._client.deep_decrypt(item)
-                    successful.append(result)
-                except Exception as exc:
-                    failed.append({"item": item, "error": str(exc)})
-
-            if (
-                options
-                and options.delay_between_batches_ms > 0
-                and i + batch_size < len(items)
-            ):
-                time.sleep(options.delay_between_batches_ms / 1_000)
-
-        total = len(items)
-        processed = len(successful) + len(failed)
-        percentage = (len(successful) / total * 100) if total > 0 else 100.0
-
-        return MigrationResult(
-            successful=successful,
-            failed=failed,
-            summary=MigrationSummary(
-                total=total,
-                processed=processed,
-                successful=len(successful),
-                failed=len(failed),
-                percentage=round(percentage, 2),
-            ),
-        )
-
-
 # ---------------------------------------------------------------------------
 # Main client
 # ---------------------------------------------------------------------------
 
 class CipherionClient:
-    """
-        Python client for interacting with the Cipherion encryption API.
-
-        This client provides utilities for:
-        - Simple string encryption/decryption
-        - Deep encryption of nested data structures
-        - Batch migration utilities
-        - Configuration management
-
-        Environment variables (optional):
-            CIPHERION_BASE_URL
-            CIPHERION_PROJECT_ID
-            CIPHERION_API_KEY
-            CIPHERION_PASSPHRASE
-
-        Example:
-            >>> client = CipherionClient()
-            >>> encrypted = client.encrypt("hello")
-            >>> decrypted = client.decrypt(encrypted)
-    """
     def __init__(self, config: Optional[dict] = None) -> None:
-            """
-        Initialize the Cipherion client.
+        self._config = self._build_config(config or {})
+        Validator.validate_config(self._config)
 
-        Builds configuration from the provided dictionary and environment
-        variables, validates it, and prepares HTTP and migration helpers.
+        self._logger = CipherionLogger(self._config.log_level)
+        self._http_client = self._make_http_client()
+        self._migration_helper = MigrationHelper(self)
 
-        Args:
-            config (Optional[dict]): Partial configuration overrides. Any
-                missing values will be read from environment variables.
-
-        Raises:
-            CipherionError: If required configuration values are missing.
-
-        Example:
-            >>> client = CipherionClient({
-            ...     "base_url": "https://api.cipherion.com",
-            ...     "project_id": "proj_123",
-            ...     "api_key": "key_abc",
-            ...     "passphrase": "secret"
-            ... })
-        """
-
-    
-            self._config = self._build_config(config or {})
-            Validator.validate_config(self._config)
-
-            self._logger = CipherionLogger(self._config.log_level)
-            self._http_client = self._make_http_client()
-            self._migration_helper = MigrationHelper(self)
-
-            if self._config.enable_logging:
-                self._logger.info("CipherionClient initialized")
+        if self._config.enable_logging:
+            self._logger.info("CipherionClient initialized")
 
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
 
     def _build_config(self, provided: dict) -> CipherionConfig:
-        """
-        Construct the final client configuration.
-
-        Priority order:
-            1. Explicit values in `provided`
-            2. Environment variables
-            3. Default values
-
-        Args:
-            provided (dict): User-supplied configuration values.
-
-        Returns:
-            CipherionConfig: Fully populated configuration object.
-         """
         return CipherionConfig(
             base_url=provided.get("base_url") or os.environ.get("CIPHERION_BASE_URL", ""),
             project_id=provided.get("project_id") or os.environ.get("CIPHERION_PROJECT_ID", ""),
@@ -364,13 +54,6 @@ class CipherionClient:
         )
 
     def _make_http_client(self) -> HttpClient:
-         
-        """
-        Create and configure the internal HTTP client.
-
-        Returns:
-            HttpClient: Configured HTTP client instance used for API calls.
-        """
         return HttpClient(
             self._config.base_url,
             self._config.api_key,
@@ -380,16 +63,6 @@ class CipherionClient:
 
     @staticmethod
     def _get_data_type(data: Any) -> str:
-        """
-        Determine a normalized data type label for logging purposes.
-
-        Args:
-            data (Any): Input data.
-
-        Returns:
-            str: One of 'null', 'array', 'object', 'boolean',
-            'number', 'string', or the Python type name.
-        """
         if data is None:
             return "null"
         if isinstance(data, list):
@@ -411,17 +84,7 @@ class CipherionClient:
     # ------------------------------------------------------------------
 
     def encrypt(self, data: str) -> str:
-        """Encrypts a simple string.  Args:
-                data (str): The plaintext string to encrypt.
-
-            Returns:
-                str: Encrypted string output from Cipherion.
-
-            Raises:
-            CipherionError: If validation fails or API returns an error.
-
-            Example:
-            >>> result = client.encrypt("my-secret-data")"""
+        """Encrypts a simple string."""
         start_time = time.time()
 
         try:
@@ -468,17 +131,7 @@ class CipherionClient:
             raise CipherionError(server_message, status) from exc
 
     def decrypt(self, encrypted_data: str) -> str:
-        """Decrypts a simple string.Args:
-            encrypted_data (str): The encrypted string to decrypt.
-
-            Returns:
-                str: Decrypted plaintext.
-
-            Raises:
-                CipherionError: If validation fails or API returns an error.
-
-            Example:
-                >>> result = client.decrypt(encrypted_text)"""
+        """Decrypts a simple string."""
         start_time = time.time()
 
         try:
@@ -527,33 +180,7 @@ class CipherionClient:
         data: Any,
         options: Optional[DeepEncryptOptions] = None,
     ) -> dict:
-        """ Encrypts complex data structures while preserving structure.
-
-        Supports nested dictionaries, lists, and mixed data types.
-        Specific fields or patterns can be excluded from encryption.
-
-        Args:
-            data (Any): The data structure to encrypt.
-            options (DeepEncryptOptions, optional):
-                - exclude_fields: Explicit field paths to skip.
-                - exclude_patterns: Wildcard patterns to skip.
-
-        Returns:
-            dict: Encrypted data along with metadata.
-
-        Raises:
-            CipherionError: If validation fails or API returns an error.
-
-        Example:
-            >>> result = client.deep_encrypt(data)
-
-            >>> result = client.deep_encrypt(
-            ...     data,
-            ...     DeepEncryptOptions(
-            ...         exclude_fields=["profile.id"],
-            ...         exclude_patterns=["*_at"]
-            ...     )
-            ... )"""
+        """Encrypts complex data structures while preserving structure."""
         start_time = time.time()
 
         try:
@@ -614,28 +241,7 @@ class CipherionClient:
         encrypted_data: Any,
         options: Optional[DeepDecryptOptions] = None,
     ) -> dict:
-        """Decrypts complex data structures that were encrypted using deep_encrypt.
-
-            Args:
-                encrypted_data (Any): The encrypted data structure.
-                options (DeepDecryptOptions, optional):
-                    - exclude_fields: Fields to skip during decryption.
-                    - exclude_patterns: Pattern-based exclusions.
-                    - fail_gracefully: Continue even if some fields fail.
-
-            Returns:
-                dict: Decrypted data with metadata.
-
-            Raises:
-                CipherionError: If validation fails or API returns an error.
-
-            Example:
-                >>> result = client.deep_decrypt(encrypted_data)
-
-                >>> result = client.deep_decrypt(
-                ...     encrypted_data,
-                ...     DeepDecryptOptions(fail_gracefully=True)
-                ... )"""
+        """Decrypts complex data structures encrypted with deep_encrypt."""
         start_time = time.time()
 
         try:
@@ -698,23 +304,7 @@ class CipherionClient:
         data_array: list[Any],
         options: Optional[MigrationOptions] = None,
     ) -> MigrationResult:
-        """ Migrates an array of data by encrypting each item in batches.
-
-            Useful for processing large datasets without blocking the event loop
-            or hitting API rate limits.
-
-            Args:
-                data_array (list[Any]): List of items to encrypt.
-                options (MigrationOptions, optional): Batch configuration.
-
-            Returns:
-                MigrationResult: Summary of successful and failed items.
-
-            Raises:
-                CipherionError: If passphrase is missing or input is invalid.
-
-            Example:
-                >>> result = client.migrate_encrypt(data_list)"""
+        """Encrypts an array of items in batches."""
         passphrase = self._config.passphrase
 
         if not passphrase:
@@ -727,7 +317,7 @@ class CipherionClient:
             return MigrationResult(
                 successful=[],
                 failed=[],
-                summary=MigrationSummary(total=0, processed=0, successful=0, failed=0, percentage=100.0),
+                summary=MigrationProgress(total=0, processed=0, successful=0, failed=0, percentage=100.0),
             )
 
         if self._config.enable_logging:
@@ -763,20 +353,7 @@ class CipherionClient:
         encrypted_array: list[Any],
         options: Optional[MigrationOptions] = None,
     ) -> MigrationResult:
-        """ Migrates an array of encrypted data by decrypting each item in batches.
-
-            Args:
-                encrypted_array (list[Any]): List of encrypted items.
-                options (MigrationOptions, optional): Batch configuration.
-
-            Returns:
-                MigrationResult: Summary of successful and failed items.
-
-            Raises:
-                CipherionError: If passphrase is missing or input is invalid.
-
-            Example:
-                >>> result = client.migrate_decrypt(encrypted_list)"""
+        """Decrypts an array of encrypted items in batches."""
         passphrase = self._config.passphrase
 
         if not passphrase:
@@ -789,7 +366,7 @@ class CipherionClient:
             return MigrationResult(
                 successful=[],
                 failed=[],
-                summary=MigrationSummary(total=0, processed=0, successful=0, failed=0, percentage=100.0),
+                summary=MigrationProgress(total=0, processed=0, successful=0, failed=0, percentage=100.0),
             )
 
         if self._config.enable_logging:
@@ -821,12 +398,7 @@ class CipherionClient:
             raise
 
     def get_config(self) -> dict:
-        """Returns the current client configuration without sensitive fields.
-
-            Sensitive values like api_key and passphrase are intentionally omitted.
-
-            Returns:
-                dict: Safe configuration dictionary"""
+        """Returns the current configuration without sensitive fields."""
         return {
             "base_url": self._config.base_url,
             "project_id": self._config.project_id,
@@ -837,17 +409,7 @@ class CipherionClient:
         }
 
     def update_config(self, new_config: dict) -> None:
-        """ Updates non-sensitive configuration fields.
-
-            Note:
-                api_key and passphrase cannot be updated after initialization.
-                Attempting to update them will raise an error.
-
-            Args:
-                new_config (dict): Configuration fields to update.
-
-            Raises:
-                CipherionError: If attempting to update sensitive credentials."""
+        """Updates non-sensitive configuration fields."""
         if "api_key" in new_config or "passphrase" in new_config:
             self._logger.warn("Attempted to update sensitive credentials - operation ignored")
             raise CipherionError(

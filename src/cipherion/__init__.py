@@ -12,7 +12,6 @@ Usage:
 from .client.cipherion_client import CipherionClient
 from .errors.cipherion_error import CipherionError
 
-# api equivalents of export * from './types/api'
 from .types.api import (
     BaseResponse,
     EncryptData,
@@ -42,7 +41,6 @@ from .types.api import (
     AnonymizeResponse,
 )
 
-# client_types equivalents of export * from './types/client'
 from .types.client import (
     LogLevel,
     CipherionConfig,
@@ -53,14 +51,11 @@ from .types.client import (
     MigrationResult,
 )
 
-# Mirrors: export default CipherionClient
 default = CipherionClient
 
 __all__ = [
-    # Core
     "CipherionClient",
     "CipherionError",
-    # API types
     "BaseResponse",
     "EncryptData",
     "EncryptResponse",
@@ -87,7 +82,6 @@ __all__ = [
     "AnonymizeStatistics",
     "AnonymizeData",
     "AnonymizeResponse",
-    # Client types
     "LogLevel",
     "CipherionConfig",
     "ExclusionOptions",
@@ -95,6 +89,5 @@ __all__ = [
     "MigrationProgress",
     "FailedMigrationItem",
     "MigrationResult",
-    # Default export equivalent
     "default",
 ]
