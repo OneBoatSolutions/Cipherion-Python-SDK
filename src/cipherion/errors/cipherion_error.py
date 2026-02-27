@@ -27,6 +27,26 @@ class CipherionError(Exception):
         details: Optional[str] = None,
         original_error: Optional[Exception] = None,
     ) -> None:
+        """
+            Initialize a new CipherionError instance.
+
+            Args:
+                message (str): Human-readable error message.
+                status_code (int, optional):
+                    HTTP-style status code. Defaults to 500.
+                    Use 0 for network/client-side errors.
+                details (Optional[str], optional):
+                    Additional context about the error.
+                original_error (Optional[Exception], optional):
+                    The underlying exception that caused this error.
+
+            Example:
+                >>> raise CipherionError(
+                ...     "API request failed",
+                ...     status_code=500,
+                ...     details="Upstream timeout"
+                ... )
+        """
         super().__init__(message)
         self.message = message
         self.status_code = status_code
@@ -35,6 +55,13 @@ class CipherionError(Exception):
         self.timestamp: str = datetime.now(timezone.utc).isoformat()
 
     def __repr__(self) -> str:
+        """
+            Return a developer-friendly representation of the error.
+
+            Returns:
+                str: Debug representation including message, status code,
+                and timestamp.
+        """
         return (
             f"CipherionError(message={self.message!r}, "
             f"status_code={self.status_code}, "
@@ -48,8 +75,25 @@ class CipherionError(Exception):
     @classmethod
     def from_response(cls, response: Any) -> "CipherionError":
         """
-        Creates a CipherionError from an API response payload.
-        Sanitizes response data to prevent sensitive info leakage.
+         Create a CipherionError from an API response payload.
+
+        This method safely extracts error information from the server
+        response while avoiding accidental leakage of sensitive data.
+
+        Args:
+            response (Any): Parsed JSON response from the API.
+
+        Returns:
+            CipherionError: Normalized SDK error instance.
+
+        Behavior:
+            - Extracts `message` if present
+            - Extracts `statusCode` if present
+            - Extracts nested error details when available
+            - Falls back to safe defaults if parsing fails
+
+        Example:
+            >>> err = CipherionError.from_response(api_response)
         """
         message: str = (
             response.get("message", "Unknown API error")
@@ -72,13 +116,33 @@ class CipherionError(Exception):
     @classmethod
     def from_requests_error(cls, error: Exception) -> "CipherionError":
         """
-        Creates a CipherionError from a ``requests`` library exception.
-        Handles HTTP response errors, connection errors, and configuration errors.
+        Create a CipherionError from a ``requests`` library exception.
 
-        Mirrors the behaviour of ``fromAxiosError`` in the TypeScript source:
-        - Response received  → extract status + body message
-        - No response (network) → status 0, connectivity hint
-        - Config / other        → status 0, raw exception message
+        This method normalizes different categories of network failures:
+
+        Cases handled:
+            1. HTTP response errors (4xx / 5xx)
+            2. Network/connectivity failures
+            3. Timeout errors
+            4. Request configuration errors
+
+        Args:
+            error (Exception): Exception raised by the requests library.
+
+        Returns:
+            CipherionError: Normalized SDK error.
+
+        Notes:
+            - HTTP errors preserve server status codes.
+            - Network errors use status_code = 0.
+            - Mirrors the behavior of the TypeScript
+            ``fromAxiosError`` implementation.
+
+        Example:
+            >>> try:
+            ...     requests.get(url)
+            ... except Exception as e:
+            ...     raise CipherionError.from_requests_error(e)
         """
         import requests  # local import to keep the module usable without requests installed
 
@@ -118,8 +182,16 @@ class CipherionError(Exception):
 
     def to_json(self) -> dict[str, Any]:
         """
-        Converts the error to a safe dictionary suitable for logging.
-        Excludes stack traces and sensitive data.
+            Convert the error into a safe, serializable dictionary.
+
+            Intended for structured logging and telemetry. Sensitive data
+            such as stack traces are intentionally excluded.
+
+            Returns:
+                dict[str, Any]: JSON-safe error representation.
+
+            Example:
+                >>> logger.error(error.to_json())
         """
         return {
             "name": type(self).__name__,
@@ -130,7 +202,23 @@ class CipherionError(Exception):
         }
 
     def get_user_message(self) -> str:
-        """Returns a user-friendly error message based on the status code."""
+        """  Return a user-friendly error message.
+
+            This method maps internal error states to messages suitable
+            for display in UI or client applications.
+
+            Returns:
+                str: Human-friendly error message.
+
+            Behavior:
+                - 5xx → generic server error message
+                - 401/403 → authentication guidance
+                - 429 → rate limit guidance
+                - otherwise → original message
+
+            Example:
+                >>> print(error.get_user_message())
+        """
         if self.status_code >= 500:
             return "An internal server error occurred. Please try again later."
 
@@ -144,8 +232,20 @@ class CipherionError(Exception):
 
     def is_retryable(self) -> bool:
         """
-        Returns True when the error is safe to retry.
-        Network errors (0), rate-limit (429), and 5xx server errors are retryable.
+        Determine whether the failed operation is safe to retry.
+
+        Retryable conditions include:
+
+        - Network failures (status_code == 0)
+        - Rate limiting (429)
+        - Server errors (5xx)
+
+        Returns:
+            bool: True if the operation can be retried safely.
+
+        Example:
+            >>> if error.is_retryable():
+            ...     retry_operation()
         """
         return (
             self.status_code == 0
