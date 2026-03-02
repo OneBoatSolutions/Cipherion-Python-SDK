@@ -4,9 +4,8 @@ basic_example.py - Python 3 port of the basic CipherionClient usage example.
 
 import os
 from datetime import datetime, timezone
-
-from cipherion import CipherionClient, CipherionError, DeepEncryptOptions
 from dotenv import load_dotenv
+from cipherion import CipherionClient, CipherionError, DeepEncryptOptions
 load_dotenv()
 def basic_example() -> None:
     client = CipherionClient({
