@@ -66,6 +66,7 @@ Thumbs.db
 
 # Logs
 *.log
+cipherion-logs
 
 # Temporary files
 *.tmp
