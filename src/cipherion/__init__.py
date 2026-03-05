@@ -11,7 +11,7 @@ Usage:
 
 from .client.cipherion_client import CipherionClient
 from .errors.cipherion_error import CipherionError
-
+from .client.async_cipherion_client import AsyncCipherionClient
 from .types.api import (
     BaseResponse,
     EncryptData,
@@ -55,6 +55,7 @@ default = CipherionClient
 
 __all__ = [
     "CipherionClient",
+    "AsyncCipherionClient",
     "CipherionError",
     "BaseResponse",
     "EncryptData",
