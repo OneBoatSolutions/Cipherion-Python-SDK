@@ -46,6 +46,9 @@ Repository = "https://github.com/OneBoatSolutions/Cipherion-Python-SDK"
 [tool.hatch.build.targets.wheel]
 packages = ["src/cipherion"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"src/cipherion/py.typed" = "cipherion/py.typed"
+
 [tool.hatch.build.targets.sdist]
 include = [
     "src/",

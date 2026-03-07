@@ -1,5 +1,5 @@
 """
-CipherionClient - Python 3 port of the TypeScript CipherionClient
+CipherionClient 
 """
 
 from __future__ import annotations
